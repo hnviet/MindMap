@@ -467,8 +467,6 @@ class MindMapApp:
         editor.title("Edit Node")
         editor.transient(self.root)
         editor.grab_set()
-        editor.geometry("420x280")
-
         toolbar = tk.Frame(editor)
         toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
 
@@ -517,24 +515,29 @@ class MindMapApp:
         tk.Button(toolbar, text="Bullet", command=apply_bullets).pack(side=tk.LEFT, padx=2)
         tk.Button(toolbar, text="Number", command=apply_numbering).pack(side=tk.LEFT, padx=2)
 
-        action_bar = tk.Frame(editor)
-        action_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
-
-        def save_and_close() -> None:
+        def persist_text() -> None:
             new_text = text_widget.get("1.0", "end").rstrip("\n")
             text = new_text if new_text.strip() else " "
             self.nodes[nid]["text"] = text
             self._update_node_label(nid)
             self._set_status("Node text updated.")
+
+        def save_and_close() -> None:
+            persist_text()
             editor.destroy()
 
         def cancel() -> None:
             editor.destroy()
 
-        tk.Button(action_bar, text="Confirm", command=save_and_close).pack(side=tk.RIGHT, padx=4)
-        tk.Button(action_bar, text="Cancel", command=cancel).pack(side=tk.RIGHT)
 
-        editor.bind("<Control-s>", lambda _e: save_and_close())
+        tk.Button(toolbar, text="Confirm", command=save_and_close).pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="Save", command=persist_text).pack(side=tk.RIGHT)
+        tk.Button(toolbar, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+        editor.update_idletasks()
+        width = min(420, editor.winfo_reqwidth())
+        height = min(200, editor.winfo_reqheight())
+        editor.geometry(f"{width}x{height}")
+        editor.minsize(width, height)
         editor.bind("<Escape>", lambda _e: cancel())
         editor.wait_window()
 
@@ -797,12 +800,14 @@ class MindMapApp:
     def _parse_formatted_lines(self, text: str) -> List[List[Tuple[str, bool, bool]]]:
         lines = text.split("\n") if text else [""]
         parsed: List[List[Tuple[str, bool, bool]]] = []
+        bold = False
+        italic = False
         for raw in lines:
             segments: List[Tuple[str, bool, bool]] = []
-            buf = []
+            buf: List[str] = []
+            line_start_bold = bold
+            line_start_italic = italic
             i = 0
-            bold = False
-            italic = False
             while i < len(raw):
                 if raw.startswith("**", i):
                     if buf:
@@ -824,7 +829,7 @@ class MindMapApp:
             if buf:
                 segments.append((''.join(buf), bold, italic))
             if not segments:
-                segments.append((" ", bold, italic))
+                segments.append((" ", line_start_bold, line_start_italic))
             parsed.append(segments)
         return parsed
 
