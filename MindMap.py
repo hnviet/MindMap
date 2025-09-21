@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 # --------- Configuration ---------
 NODE_W = 160
 NODE_H = 56
-HORIZ_GAP = 120
+HORIZ_GAP = 60
 VERT_GAP = 36
 FONT = ("Segoe UI", 11)
 SEL_OUTLINE = "#0ea5e9"
@@ -26,13 +26,21 @@ DEFAULT_STATUS = (
     "Use the menu bar or shortcuts (A=Add child, Enter=Edit, Del=Delete). "
     "Double-click canvas to add a node; drag to move."
 )
-LEVEL_COLORS = [
-    "#fef9c3", "#fde68a", "#fee2e2", "#fecdd3", "#fbf4ff",
-    "#e0f2fe", "#bae6fd", "#cffafe", "#d8b4fe", "#ede9fe",
-    "#dcfce7", "#bbf7d0", "#f0fdf4", "#f5f3ff", "#fff1f2",
-    "#f5e0ff", "#fef3c7", "#fde4cf", "#cff1ff", "#ffe4f3",
+
+PALETTE_COLORS = [
+    "#B9C2FF",
+    "#FFB3BE",
+    "#FFF49A",
+    "#C6FFB0",
+    "#B7F0FF",
+    "#DDB096",
+    "#B5A0DD",
+    "#9DDDD0",
+    "#DDA0B7",
+    "#B1DD53",
 ]
 
+LEVEL_COLORS = PALETTE_COLORS
 
 @dataclass
 class Workspace:
@@ -43,6 +51,8 @@ class Workspace:
     nodes: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     parent: Dict[int, Optional[int]] = field(default_factory=dict)
     canvas_items: Dict[int, Dict[str, int]] = field(default_factory=dict)
+    edge_offsets: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    palette_index: int = 0
     item_to_node: Dict[int, int] = field(default_factory=dict)
     selected_ids: Set[int] = field(default_factory=set)
     primary_selected: Optional[int] = None
@@ -132,7 +142,7 @@ class MindMapApp:
         self._build_level_panel()
 
     def _init_color_tools(self) -> None:
-        self._color_palette = LEVEL_COLORS[:] or ["#fef9c3"]
+        self._color_palette = PALETTE_COLORS[:] if PALETTE_COLORS else LEVEL_COLORS[:] or ["#fef9c3"]
         self._palette_cols = 5
         self._palette_window: Optional[tk.Toplevel] = None
         self._context_node: Optional[int] = None
@@ -529,17 +539,26 @@ class MindMapApp:
         def cancel() -> None:
             editor.destroy()
 
+        button_group = tk.Frame(toolbar)
+        button_group.pack(side=tk.RIGHT, padx=(0, 4))
+        tk.Button(button_group, text="Confirm", command=save_and_close).pack(side=tk.RIGHT, padx=2)
+        tk.Button(button_group, text="Save", command=persist_text).pack(side=tk.RIGHT, padx=2)
+        tk.Button(button_group, text="Cancel", command=cancel).pack(side=tk.RIGHT, padx=2)
 
-        tk.Button(toolbar, text="Confirm", command=save_and_close).pack(side=tk.RIGHT, padx=4)
-        tk.Button(toolbar, text="Save", command=persist_text).pack(side=tk.RIGHT)
-        tk.Button(toolbar, text="Cancel", command=cancel).pack(side=tk.RIGHT)
         editor.update_idletasks()
-        width = min(420, editor.winfo_reqwidth())
-        height = min(200, editor.winfo_reqheight())
-        editor.geometry(f"{width}x{height}")
-        editor.minsize(width, height)
+        editor.geometry("420x200")
+        editor.minsize(420, 200)
+        editor.protocol("WM_DELETE_WINDOW", cancel)
         editor.bind("<Escape>", lambda _e: cancel())
         editor.wait_window()
+
+    def _next_auto_color(self) -> str:
+        palette = getattr(self, "_color_palette", []) or LEVEL_COLORS or ["#ffffff"]
+        ws = self.ws
+        color = palette[ws.palette_index % len(palette)]
+        ws.palette_index += 1
+        return color
+
 
     def set_root(self) -> None:
         nid = self.selected_id
@@ -559,14 +578,14 @@ class MindMapApp:
         nid = self._new_id()
         if depth is None:
             depth = 0
-        fill = self._default_fill_for_depth(depth)
+        fill = self._next_auto_color()
         self.nodes[nid] = {
             "text": text,
             "x": nx,
             "y": ny,
             "children": [],
             "fill": fill,
-            "custom": False,
+            "custom": True,
             "w": NODE_W,
             "h": NODE_H,
         }
@@ -948,6 +967,7 @@ class MindMapApp:
         cid: int,
         start: Tuple[float, float],
         end: Tuple[float, float],
+        extra_lateral: float = 0.0,
     ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         sx, sy = start
         ex, ey = end
@@ -962,15 +982,16 @@ class MindMapApp:
         else:
             spread = 0.0
         scale = self.ws.scale or 1.0
-        smoothing = min(1.0, max(0.2, dist / (NODE_W * scale * 1.4)))
-        lateral = spread * NODE_H * scale * 0.4 * smoothing
+        smoothing = min(1.0, max(0.25, dist / (NODE_W * scale * 1.25)))
+        lateral = spread * NODE_H * scale * 0.32 * smoothing
         nx, ny = dx / dist, dy / dist
         tx, ty = -ny, nx
-        base_pull = min(max(dist * 0.33, NODE_W * scale * 0.38), NODE_W * scale * 1.4)
-        base_pull *= smoothing + 0.2
+        base_pull = min(max(dist * 0.22, NODE_W * scale * 0.3), NODE_W * scale * 1.05)
+        base_pull *= 0.75 + smoothing * 0.55
         if dist < NODE_W * scale * 0.75:
-            base_pull = dist * 0.38
-            lateral *= 0.35
+            base_pull = dist * 0.3
+            lateral *= 0.4
+        lateral += extra_lateral
         cp1 = [sx + nx * base_pull + tx * lateral, sy + ny * base_pull + ty * lateral]
         cp2 = [ex - nx * base_pull + tx * lateral, ey - ny * base_pull + ty * lateral]
 
@@ -1010,8 +1031,8 @@ class MindMapApp:
             cp2[0] += push_x * w2
             cp2[1] += push_y * w2
 
-        max_perp = max(NODE_H * scale * 0.6 * smoothing + NODE_H * scale * 0.2, dist * 0.28)
-        min_along = dist * 0.18
+        max_perp = max(NODE_H * scale * (0.4 * smoothing + 0.18), dist * 0.22)
+        min_along = dist * 0.1
         max_along = dist - min_along
         def clamp_point(point: List[float]) -> List[float]:
             rel_x = point[0] - sx
@@ -1177,15 +1198,26 @@ class MindMapApp:
     def redraw(self) -> None:
         self._refresh_all_positions()
         self.canvas.delete("edge")
-        for pid, cid in self._edges():
-            self._draw_edge(pid, cid)
+        edges = list(self._edges())
+        valid_keys = set(edges)
+        for key in list(self.ws.edge_offsets.keys()):
+            if key not in valid_keys:
+                self.ws.edge_offsets.pop(key, None)
+        drawn_paths: List[Dict[str, Any]] = []
+        for pid, cid in edges:
+            self._render_edge(pid, cid, drawn_paths)
         self.canvas.tag_lower("edge")
         self._highlight_selection()
 
     def redraw_edges_of_node_and_neighbors(self, nid: int) -> None:
         self.redraw()
 
-    def _draw_edge(self, pid: int, cid: int) -> None:
+    def _render_edge(
+        self,
+        pid: int,
+        cid: int,
+        drawn_paths: List[Dict[str, Any]],
+    ) -> None:
         px, py = self._node_center(pid)
         cx, cy = self._node_center(cid)
         start = self._edge_exit_point(pid, cx, cy)
@@ -1193,27 +1225,160 @@ class MindMapApp:
         if abs(start[0] - end[0]) + abs(start[1] - end[1]) < 6:
             start = (start[0] * 0.9 + px * 0.1, start[1] * 0.9 + py * 0.1)
             end = (end[0] * 0.9 + cx * 0.1, end[1] * 0.9 + cy * 0.1)
-        if not self._has_obstacle_between(pid, cid, start, end):
-            self.canvas.create_line(
-                *start,
-                *end,
-                fill=EDGE_COLOR,
-                width=2,
-                tags="edge",
-            )
-            return
-        cp1, cp2 = self._edge_control_points(pid, cid, start, end)
+        base_offset = self.ws.edge_offsets.get((pid, cid), 0.0)
+        candidates = self._edge_offset_candidates(base_offset)
+        chosen_points: Optional[List[Tuple[float, float]]] = None
+        chosen_offset = base_offset
+        for offset in candidates:
+            cp1, cp2 = self._edge_control_points(pid, cid, start, end, offset)
+            points = self._sample_edge_points(start, cp1, cp2, end)
+            if not self._path_intersects(points, drawn_paths, start, end):
+                chosen_points = points
+                chosen_offset = offset
+                break
+        if chosen_points is None:
+            fallback_offset = candidates[-1]
+            cp1, cp2 = self._edge_control_points(pid, cid, start, end, fallback_offset)
+            chosen_points = self._sample_edge_points(start, cp1, cp2, end)
+            chosen_offset = fallback_offset
+        self.ws.edge_offsets[(pid, cid)] = chosen_offset
+        flat = [coord for point in chosen_points for coord in point]
         self.canvas.create_line(
-            *start,
-            *cp1,
-            *cp2,
-            *end,
+            *flat,
             fill=EDGE_COLOR,
             width=2,
             smooth=True,
             splinesteps=32,
             tags="edge",
         )
+        drawn_paths.append({"points": chosen_points, "start": start, "end": end})
+
+    def _edge_offset_candidates(self, base: float) -> List[float]:
+        steps = [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0, 80.0, -80.0]
+        offsets: List[float] = []
+        for step in steps:
+            candidate = base + step
+            if not offsets or abs(offsets[-1] - candidate) > 1e-6:
+                offsets.append(candidate)
+        return offsets
+
+    def _sample_edge_points(
+        self,
+        start: Tuple[float, float],
+        cp1: Tuple[float, float],
+        cp2: Tuple[float, float],
+        end: Tuple[float, float],
+        steps: int = 32,
+    ) -> List[Tuple[float, float]]:
+        if steps < 2:
+            steps = 2
+        points: List[Tuple[float, float]] = []
+        for i in range(steps + 1):
+            t = i / steps
+            mt = 1.0 - t
+            x = (mt ** 3) * start[0] + 3 * (mt ** 2) * t * cp1[0] + 3 * mt * (t ** 2) * cp2[0] + (t ** 3) * end[0]
+            y = (mt ** 3) * start[1] + 3 * (mt ** 2) * t * cp1[1] + 3 * mt * (t ** 2) * cp2[1] + (t ** 3) * end[1]
+            points.append((x, y))
+        return points
+
+    def _path_intersects(
+        self,
+        points: List[Tuple[float, float]],
+        existing: List[Dict[str, Any]],
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+    ) -> bool:
+        for info in existing:
+            if self._shares_endpoint(start, end, info["start"], info["end"]):
+                continue
+            if self._paths_cross(points, info["points"]):
+                return True
+        return False
+
+    def _shares_endpoint(
+        self,
+        start_a: Tuple[float, float],
+        end_a: Tuple[float, float],
+        start_b: Tuple[float, float],
+        end_b: Tuple[float, float],
+        tol: float = 6.0,
+    ) -> bool:
+        return (
+            self._points_close(start_a, start_b, tol)
+            or self._points_close(start_a, end_b, tol)
+            or self._points_close(end_a, start_b, tol)
+            or self._points_close(end_a, end_b, tol)
+        )
+
+    def _paths_cross(
+        self,
+        a_points: List[Tuple[float, float]],
+        b_points: List[Tuple[float, float]],
+    ) -> bool:
+        for seg_a_start, seg_a_end in zip(a_points, a_points[1:]):
+            for seg_b_start, seg_b_end in zip(b_points, b_points[1:]):
+                if self._segments_share_endpoint(seg_a_start, seg_a_end, seg_b_start, seg_b_end):
+                    continue
+                if self._segments_intersect(seg_a_start, seg_a_end, seg_b_start, seg_b_end):
+                    return True
+        return False
+
+    def _segments_share_endpoint(
+        self,
+        a_start: Tuple[float, float],
+        a_end: Tuple[float, float],
+        b_start: Tuple[float, float],
+        b_end: Tuple[float, float],
+        tol: float = 1.5,
+    ) -> bool:
+        return (
+            self._points_close(a_start, b_start, tol)
+            or self._points_close(a_start, b_end, tol)
+            or self._points_close(a_end, b_start, tol)
+            or self._points_close(a_end, b_end, tol)
+        )
+
+    def _points_close(
+        self,
+        a: Tuple[float, float],
+        b: Tuple[float, float],
+        tol: float = 0.5,
+    ) -> bool:
+        return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+    def _segments_intersect(
+        self,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        q1: Tuple[float, float],
+        q2: Tuple[float, float],
+    ) -> bool:
+        def orientation(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> float:
+            return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+        def on_segment(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> bool:
+            return (
+                min(a[0], c[0]) - 1e-6 <= b[0] <= max(a[0], c[0]) + 1e-6
+                and min(a[1], c[1]) - 1e-6 <= b[1] <= max(a[1], c[1]) + 1e-6
+            )
+
+        o1 = orientation(p1, p2, q1)
+        o2 = orientation(p1, p2, q2)
+        o3 = orientation(q1, q2, p1)
+        o4 = orientation(q1, q2, p2)
+        tol = 1e-6
+        if (o1 > tol and o2 < -tol) or (o1 < -tol and o2 > tol):
+            if (o3 > tol and o4 < -tol) or (o3 < -tol and o4 > tol):
+                return True
+        if abs(o1) <= tol and on_segment(p1, q1, p2):
+            return True
+        if abs(o2) <= tol and on_segment(p1, q2, p2):
+            return True
+        if abs(o3) <= tol and on_segment(q1, p1, q2):
+            return True
+        if abs(o4) <= tol and on_segment(q1, p2, q2):
+            return True
+        return False
 
     def _collect_subtree(self, nid: int) -> Iterable[int]:
         collected: List[int] = []
@@ -1247,12 +1412,23 @@ class MindMapApp:
         }
         self._set_status("Drag to pan the workspace.")
 
-    def on_double_click(self, event: tk.Event) -> None:
+    def on_double_click(self, event: tk.Event) -> Optional[str]:
         self._hide_color_palette()
-        lx, ly = self._from_canvas_point(event.x, event.y)
-        nid = self._create_node("New Node", lx, ly, depth=0)
-        self._select(nid)
-        self._set_status("New node created.")
+        if self._node_at(event.x, event.y) is not None:
+            return "break"
+        if not self.nodes:
+            lx, ly = self._from_canvas_point(event.x, event.y)
+            nid = self._create_node("Root", lx, ly, depth=0)
+            self._set_root(nid)
+            self._select(nid)
+            self._set_status("Root created.")
+            return "break"
+        target = self.selected_id or self.root_id
+        if target is not None:
+            self._select(target)
+            self.add_child()
+            return "break"
+        return "break"
 
     def on_click_node(self, event: tk.Event, nid: int) -> None:
         self._hide_color_palette()
@@ -1275,6 +1451,7 @@ class MindMapApp:
         self._hide_color_palette()
         self._select(nid)
         self.edit_selected()
+        return "break"
 
     def on_drag(self, event: tk.Event) -> None:
         mode = self.dragging.get("mode") if self.dragging else None
@@ -1353,6 +1530,8 @@ class MindMapApp:
     # ---------- Save / Load ----------
     def _load_data_into_current_workspace(self, data: dict) -> None:
         self.canvas.delete("all")
+        self.ws.edge_offsets.clear()
+        self.ws.palette_index = 0
         self.nodes.clear()
         self.parent.clear()
         self.canvas_items.clear()
@@ -1394,9 +1573,10 @@ class MindMapApp:
         provided_next = data.get("next_id", fallback_next)
         self.next_id = max(provided_next, fallback_next)
 
+        self.ws.palette_index = len(self.nodes)
         for nid in self.nodes:
             shape, txt = self._draw_node(nid)
-            self.canvas_items[nid] = {"shape": shape, "text": txt}
+            self.canvas_items[nid] = {"shape": shape, "texts": txt}
 
         if self.root_id not in self.nodes:
             self.root_id = next(iter(self.nodes), None)
