@@ -53,6 +53,7 @@ class Workspace:
     canvas_items: Dict[int, Dict[str, int]] = field(default_factory=dict)
     edge_offsets: Dict[Tuple[int, int], float] = field(default_factory=dict)
     palette_index: int = 0
+    dirty: bool = False
     item_to_node: Dict[int, int] = field(default_factory=dict)
     selected_ids: Set[int] = field(default_factory=set)
     primary_selected: Optional[int] = None
@@ -66,6 +67,7 @@ class Workspace:
             "start_y": 0.0,
             "offset_x": 0.0,
             "offset_y": 0.0,
+            "moved": False,
         }
     )
     root_id: Optional[int] = None
@@ -97,6 +99,7 @@ class MindMapApp:
 
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="New Workspace", command=self.new_workspace)
+        file_menu.add_command(label="Close Workspace", command=self.close_current_workspace)
         file_menu.add_separator()
         file_menu.add_command(label="Save", command=self.save)
         file_menu.add_command(label="Load", command=self.load)
@@ -130,6 +133,12 @@ class MindMapApp:
         self.root.bind("<Control-minus>", lambda _: self.zoom(1 / ZOOM_STEP))
         self.root.bind("<Control-KP_Subtract>", lambda _: self.zoom(1 / ZOOM_STEP))
         self.root.bind("<Control-0>", lambda _: self.reset_view())
+        self.root.bind("<Control-s>", self._on_ctrl_save)
+        self.root.bind("<Control-S>", self._on_ctrl_save)
+        self.root.bind("<Control-n>", self._on_ctrl_new_workspace)
+        self.root.bind("<Control-N>", self._on_ctrl_new_workspace)
+        self.root.bind("<Control-w>", self._on_ctrl_close_workspace)
+        self.root.bind("<Control-W>", self._on_ctrl_close_workspace)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -234,9 +243,11 @@ class MindMapApp:
 
         status_var = tk.StringVar(value=DEFAULT_STATUS)
         workspace = Workspace(frame=frame, canvas=canvas, status_var=status_var, name=name, path=path)
+        workspace.palette_index = 0
+        workspace.dirty = False
         self.workspaces[frame] = workspace
 
-        self.notebook.add(frame, text=name)
+        self.notebook.add(frame, text=self._tab_title(workspace))
         self._bind_canvas(canvas)
         self.notebook.select(frame)
         self._set_active_workspace(workspace)
@@ -245,13 +256,14 @@ class MindMapApp:
 
     def _set_active_workspace(self, workspace: Workspace) -> None:
         self._current_ws = workspace
+        self._update_workspace_title(workspace)
         self.status_label.config(textvariable=workspace.status_var)
         self._update_title()
         self._highlight_selection()
 
     def _rename_workspace(self, workspace: Workspace, name: str) -> None:
         workspace.name = name
-        self.notebook.tab(workspace.frame, text=name)
+        self._update_workspace_title(workspace)
         if workspace is self._current_ws:
             self._update_title()
 
@@ -270,14 +282,81 @@ class MindMapApp:
         else:
             self._status_placeholder.set(message)
 
+    def _tab_title(self, workspace: Workspace) -> str:
+        suffix = "*" if getattr(workspace, 'dirty', False) else ""
+        return f"{workspace.name}{suffix}"
+
+    def _update_workspace_title(self, workspace: Workspace) -> None:
+        if workspace.frame in self.workspaces:
+            self.notebook.tab(workspace.frame, text=self._tab_title(workspace))
+
+    def _set_dirty(self, value: bool, workspace: Optional[Workspace] = None) -> None:
+        ws = workspace or self._current_ws
+        if ws is None:
+            return
+        if ws.dirty == value:
+            return
+        ws.dirty = value
+        self._update_workspace_title(ws)
+
+    def _mark_dirty(self) -> None:
+        self._set_dirty(True)
+
     def new_workspace(self) -> None:
         workspace = self._create_workspace()
         workspace.scale = 1.0
         workspace.offset_x = 0.0
         workspace.offset_y = 0.0
+        self._set_dirty(False, workspace)
         self._set_status(f"{workspace.name} ready.")
 
-    # ---------- Convenience properties ----------
+    def close_current_workspace(self) -> bool:
+        workspace = self._current_ws
+        if workspace is None:
+            return False
+        if workspace.dirty:
+            result = messagebox.askyesnocancel(
+                "Unsaved changes",
+                f"Save changes to {workspace.name}?",
+            )
+            if result is None:
+                return False
+            if result:
+                if not self.save():
+                    return False
+        frame = workspace.frame
+        self.workspaces.pop(frame, None)
+        self.notebook.forget(frame)
+        frame.destroy()
+        self._current_ws = None
+        if self.workspaces:
+            current_tab = self.notebook.select()
+            next_ws = None
+            if current_tab:
+                next_ws = self.workspaces.get(self.notebook.nametowidget(current_tab))
+            if next_ws is None and self.workspaces:
+                next_ws = next(iter(self.workspaces.values()))
+                self.notebook.select(next_ws.frame)
+            if next_ws:
+                self._set_active_workspace(next_ws)
+                self._refresh_level_panel()
+                self._set_status(f"{next_ws.name} ready.")
+        else:
+            self.new_workspace()
+        return True
+
+    def _on_ctrl_new_workspace(self, _event: Optional[tk.Event] = None) -> str:
+        self.new_workspace()
+        return "break"
+
+    def _on_ctrl_save(self, _event: Optional[tk.Event] = None) -> str:
+        self.save()
+        return "break"
+
+    def _on_ctrl_close_workspace(self, _event: Optional[tk.Event] = None) -> str:
+        self.close_current_workspace()
+        return "break"
+
     @property
     def ws(self) -> Workspace:
         if self._current_ws is None:
@@ -461,6 +540,8 @@ class MindMapApp:
             self.nodes.pop(cid, None)
         if self.root_id in ids:
             self.root_id = next(iter(self.nodes), None)
+        if ids:
+            self._mark_dirty()
         self.selected_id = None
         self.redraw()
         self._refresh_level_panel()
@@ -528,8 +609,12 @@ class MindMapApp:
         def persist_text() -> None:
             new_text = text_widget.get("1.0", "end").rstrip("\n")
             text = new_text if new_text.strip() else " "
+            old_text = self.nodes[nid].get("text", "")
+            if old_text == text:
+                return
             self.nodes[nid]["text"] = text
             self._update_node_label(nid)
+            self._mark_dirty()
             self._set_status("Node text updated.")
 
         def save_and_close() -> None:
@@ -569,9 +654,12 @@ class MindMapApp:
         self._set_status(f"Root set to node {nid} ({self.nodes[nid]['text']}).")
 
     def _set_root(self, nid: int) -> None:
+        if self.root_id == nid:
+            return
         self.root_id = nid
         self.parent[nid] = None
         self._update_title()
+        self._mark_dirty()
 
     def _create_node(self, text: str, x: float, y: float, depth: Optional[int] = None) -> int:
         nx, ny = self._find_free_position(x, y)
@@ -594,6 +682,7 @@ class MindMapApp:
         self.canvas_items[nid] = {"shape": shape, "texts": texts}
         self._update_node_size(nid)
         self.redraw_edges_of_node_and_neighbors(nid)
+        self._mark_dirty()
         if self.root_id is None:
             self._set_root(nid)
         self._refresh_level_panel()
@@ -1169,12 +1258,16 @@ class MindMapApp:
             targets = {self._context_node}
         if not targets:
             return
+        changed = False
         for nid in targets:
             if nid not in self.nodes:
                 continue
             self.nodes[nid]["fill"] = color
             self.nodes[nid]["custom"] = True
             self._update_node_fill(nid)
+            changed = True
+        if changed:
+            self._mark_dirty()
         self._set_status(f"Color applied to {len(targets)} node(s).")
         self._context_node = None
         self._hide_color_palette()
@@ -1185,6 +1278,7 @@ class MindMapApp:
             targets = {self._context_node}
         if not targets:
             return
+        changed = False
         for nid in targets:
             if nid not in self.nodes:
                 continue
@@ -1192,6 +1286,9 @@ class MindMapApp:
             self.nodes[nid]["fill"] = self._default_fill_for_depth(depth)
             self.nodes[nid]["custom"] = False
             self._update_node_fill(nid)
+            changed = True
+        if changed:
+            self._mark_dirty()
         self._set_status(f"Reset color for {len(targets)} node(s).")
         self._context_node = None
         self._hide_color_palette()
@@ -1409,6 +1506,7 @@ class MindMapApp:
             "start_y": event.y,
             "offset_x": self.ws.offset_x,
             "offset_y": self.ws.offset_y,
+            "moved": False,
         }
         self._set_status("Drag to pan the workspace.")
 
@@ -1445,6 +1543,7 @@ class MindMapApp:
             "start_y": event.y,
             "offset_x": 0.0,
             "offset_y": 0.0,
+            "moved": False,
         }
 
     def on_double_click_node(self, event: tk.Event, nid: int) -> None:
@@ -1460,8 +1559,14 @@ class MindMapApp:
             if not nid:
                 return
             lx, ly = self._from_canvas_point(event.x, event.y)
-            self.nodes[nid]["x"] = lx - float(self.dragging.get("dx", 0.0))
-            self.nodes[nid]["y"] = ly - float(self.dragging.get("dy", 0.0))
+            new_x = lx - float(self.dragging.get("dx", 0.0))
+            new_y = ly - float(self.dragging.get("dy", 0.0))
+            node = self.nodes[nid]
+            changed = node.get("x") != new_x or node.get("y") != new_y
+            node["x"] = new_x
+            node["y"] = new_y
+            if changed:
+                self.dragging["moved"] = True
             self._refresh_node_position(nid)
             self.redraw_edges_of_node_and_neighbors(nid)
         elif mode == "pan":
@@ -1477,6 +1582,8 @@ class MindMapApp:
     def on_release(self, event: tk.Event) -> None:
         if self.dragging.get("mode") == "pan":
             self.canvas.config(cursor="")
+        if self.dragging.get("mode") == "node" and self.dragging.get("moved"):
+            self._mark_dirty()
         self.dragging = {
             "mode": None,
             "id": None,
@@ -1486,6 +1593,7 @@ class MindMapApp:
             "start_y": 0.0,
             "offset_x": 0.0,
             "offset_y": 0.0,
+            "moved": False,
         }
 
     def _on_ctrl_wheel(self, event: tk.Event) -> None:
@@ -1545,6 +1653,7 @@ class MindMapApp:
             "start_y": 0.0,
             "offset_x": 0.0,
             "offset_y": 0.0,
+            "moved": False,
         }
         self.ws.scale = 1.0
         self.ws.offset_x = 0.0
@@ -1583,32 +1692,26 @@ class MindMapApp:
 
         self.redraw()
         self._refresh_level_panel()
+        self._set_dirty(False)
         if self.root_id:
             self._select(self.root_id)
         else:
             self._select(None)
 
-    def save(self) -> None:
-        if not self.nodes:
-            messagebox.showinfo("Save", "No nodes to save.")
-            return
-        initialdir = ""
-        initialfile = ""
-        if self.current_path:
-            current = Path(self.current_path)
-            initialdir = str(current.parent)
-            initialfile = current.name
-        else:
-            initialfile = f"{self.ws.name}.json"
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")],
-            title="Save Mind Map",
-            initialdir=initialdir,
-            initialfile=initialfile,
-        )
+    def save(self) -> bool:
+        path = self.current_path
         if not path:
-            return
+            initialdir = ""
+            initialfile = f"{self.ws.name}.json"
+            path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON", "*.json")],
+                title="Save Mind Map",
+                initialdir=initialdir,
+                initialfile=initialfile,
+            )
+            if not path:
+                return False
         data = {
             "root": self.root_id,
             "next_id": self.next_id,
@@ -1624,11 +1727,17 @@ class MindMapApp:
                 for nid, nd in self.nodes.items()
             },
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as exc:
+            messagebox.showerror("Save failed", str(exc))
+            return False
         self.current_path = path
         self._rename_workspace(self.ws, Path(path).stem or self.ws.name)
+        self._set_dirty(False)
         self._set_status(f"Saved to {path}.")
+        return True
 
     def load(self) -> None:
         path = filedialog.askopenfilename(
@@ -1698,6 +1807,7 @@ class MindMapApp:
         slots = self._compute_vertical_slots(root_id, directions, depths)
         root_slot = slots.get(root_id, 0.0)
 
+        moved = False
         for nid in self.nodes:
             direction = directions.get(nid, 1 if nid != root_id else 0)
             depth = depths.get(nid, 0)
@@ -1709,12 +1819,17 @@ class MindMapApp:
                 x = base_x
             offset = slots.get(nid, root_slot) - root_slot
             y = base_y + offset * (NODE_H + VERT_GAP)
-            self.nodes[nid]["x"] = x
-            self.nodes[nid]["y"] = y
-            if not self.nodes[nid].get("custom"):
-                self.nodes[nid]["fill"] = self._default_fill_for_depth(depth)
+            node = self.nodes[nid]
+            if node.get("x") != x or node.get("y") != y:
+                moved = True
+            node["x"] = x
+            node["y"] = y
+            if not node.get("custom"):
+                node["fill"] = self._default_fill_for_depth(depth)
                 self._update_node_fill(nid)
 
+        if moved:
+            self._mark_dirty()
         self.redraw()
         self._refresh_level_panel()
         self._set_status("Auto layout applied.")
